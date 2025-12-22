@@ -17,6 +17,8 @@ const auth = new google.auth.GoogleAuth({
 });
 app.locals.sheets = google.sheets({ version: 'v4', auth });
 
+app.get("/health", (_req, res) => res.status(200).send("ok"));
+
 app.use('/api', routes);
 
 app.listen(port, () => {
