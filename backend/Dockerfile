@@ -1,29 +1,18 @@
 # ---- Build stage ----
-FROM node:20-slim AS build
+FROM node:20-alpine AS build
 WORKDIR /app
-
-# Install deps (no lockfile required)
-COPY package.json ./
-RUN npm install
-
-# Copy source
-COPY . .
-
-# Build TS -> dist
+COPY package*.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY src ./src
 RUN npm run build
 
 # ---- Run stage ----
-FROM node:20-slim
+FROM node:20-alpine
 WORKDIR /app
-
-ENV NODE_ENV=production
-ENV PORT=8080
-
-# Copy only what's needed
-COPY --from=build /app/package.json ./
-RUN npm install --omit=dev
-
+COPY --from=build /app/package*.json ./
+RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
-
+ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "dist/server.js"]
