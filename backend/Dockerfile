@@ -2,11 +2,12 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 
-# Install deps first (better Docker layer caching)
-COPY package.json package-lock.json* ./
-RUN npm install
+# Copy package files (package-lock.json will be included if it exists)
+COPY package*.json ./
 
-# Copy source + config and build
+# Use npm ci if lockfile exists, otherwise npm install
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
@@ -15,16 +16,13 @@ RUN npm run build
 FROM node:20-alpine
 WORKDIR /app
 
-# Install only production deps
-COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+COPY --from=build /app/package*.json ./
 
-# Copy compiled output
+# Install prod deps (ci if lockfile exists)
+RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+
 COPY --from=build /app/dist ./dist
 
-# Cloud Run uses PORT env var (it will inject it)
 ENV PORT=8080
 EXPOSE 8080
-
-# Start server
 CMD ["node", "dist/server.js"]
