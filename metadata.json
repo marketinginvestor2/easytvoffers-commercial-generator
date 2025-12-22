@@ -1,0 +1,8 @@
+{
+  "name": "Easy TV Offers",
+  "description": "An AI-powered TV commercial generator. Create scripts, visual headlines, voiceovers, and QR-coded videos for your business in seconds.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
