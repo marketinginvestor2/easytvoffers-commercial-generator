@@ -1,94 +1,78 @@
-
-import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { ENV } from "../utils/env.js";
 
-const ai = new GoogleGenAI({ apiKey: ENV.API_KEY });
-
-export async function generateCommercialContent(biz: any) {
-  const prompt = `Create a short, punchy TV commercial script (under 15 words) and a visual headline (under 5 words) for a business.
-  Business: ${biz.businessName}
-  Type: ${biz.businessType}
-  Offer: ${biz.offer}
-  Context: ${biz.extraInfo}
-  Return as JSON with 'script' and 'headline'.`;
-
-  // Use generateContent with string contents and responseSchema configuration
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: prompt,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          script: { type: Type.STRING },
-          headline: { type: Type.STRING },
-        },
-        required: ["script", "headline"],
-      },
-    },
-  });
-
-  return JSON.parse(response.text);
+function requireEnv(name: string, value: string | undefined): string {
+  if (!value || value.trim() === "") throw new Error(`Missing required env var: ${name}`);
+  return value;
 }
 
-export async function generateBackgroundImage(headline: string, bizType: string) {
-  const prompt = `A cinematic, high-quality, professional background image for a TV commercial for a ${bizType} business. No text in the image. Vibrant and clean. Focus on the concept: ${headline}`;
-  
-  // Fixed: Use standard Content object with parts for image generation
+const apiKey = requireEnv("GEMINI_API_KEY", ENV.GEMINI_API_KEY);
+const ai = new GoogleGenAI({ apiKey });
+
+export async function generateCommercialContent(input: {
+  businessName: string;
+  businessType: string;
+  offer: string;
+  extraInfo?: string;
+}) {
+  const model = "gemini-2.0-flash";
+
+  const prompt = `
+Create a short local business TV commercial script and a bold visual headline.
+
+Business Name: ${input.businessName}
+Business Type: ${input.businessType}
+Offer: ${input.offer}
+Extra Info: ${input.extraInfo ?? ""}
+
+Return JSON ONLY with:
+{
+  "headline": "...",
+  "script": "..."
+}
+  `.trim();
+
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-image",
-    contents: { parts: [{ text: prompt }] },
-    config: { imageConfig: { aspectRatio: "16:9" } }
+    model,
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
   });
 
-  for (const part of response.candidates[0].content.parts) {
-    // Find the image part in the response
-    if (part.inlineData) return part.inlineData.data; // Base64
+  const text =
+    response?.candidates?.[0]?.content?.parts?.[0]?.text ??
+    // Some SDK builds also expose response.text
+    (response as any)?.text ??
+    "";
+
+  if (!text) throw new Error("Gemini returned an empty response");
+
+  const cleaned = String(text).replace(/```json|```/g, "").trim();
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    // fallback if Gemini didn't return JSON
+    parsed = { headline: input.businessName, script: cleaned };
   }
-  throw new Error("No image generated");
+
+  return {
+    headline: String(parsed?.headline ?? input.businessName),
+    script: String(parsed?.script ?? cleaned),
+  };
 }
 
-export async function generateVoiceover(text: string) {
-  // Fixed: use recommended TTS model and prompt structure
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-preview-tts",
-    contents: [{ parts: [{ text: `Say cheerfully: ${text}` }] }],
-    config: {
-      responseModalities: [Modality.AUDIO],
-      speechConfig: {
-        voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
-      },
-    },
-  });
-
-  return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data; // Base64 PCM
+// Keep these compiling even if you haven’t wired the full pipeline yet.
+// Return base64 strings if/when implemented; for now return empty strings.
+export async function generateBackgroundImage(_headline: string, _businessType: string) {
+  return "";
 }
 
-export async function generateYoutubeMetadata(bizName: string, offer: string) {
-  const prompt = `Generate a YouTube title, description, and 5 tags for an unlisted commercial.
-  Business: ${bizName}
-  Offer: ${offer}
-  Mentions "YouTube CTV" in description. No Hulu/Roku.
-  Return JSON with 'title', 'description', 'tags'.`;
+export async function generateVoiceover(_script: string) {
+  return "";
+}
 
-  // Use generateContent with string contents and responseSchema configuration
-  const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: prompt,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          title: { type: Type.STRING },
-          description: { type: Type.STRING },
-          tags: { type: Type.ARRAY, items: { type: Type.STRING } }
-        },
-        required: ["title", "description", "tags"]
-      }
-    }
-  });
-
-  return JSON.parse(response.text);
+export async function generateYoutubeMetadata(businessName: string, offer: string) {
+  const title = `${businessName} — ${offer}`.slice(0, 95);
+  const description = `Preview commercial for ${businessName}. Offer: ${offer}`;
+  return { title, description };
 }
