@@ -7,44 +7,47 @@ import {
   generateCommercialContent,
   generateBackgroundImage,
   generateVoiceover,
-  generateYoutubeMetadata
-} from './services/gemini';
+  generateYoutubeMetadata,
+} from './services/gemini.js';
 
-import { uploadBuffer } from './services/storage';
-import { appendRow, updateRowByPreviewId } from './services/sheets';
-import { enqueueRender } from './services/queue';
-import { renderCommercial } from './services/render';
-import { uploadToYoutube } from './services/youtube';
-import { ENV } from './utils/env';
+// ✅ FIX: was './storage.js' — correct path is services/storage
+import { uploadBuffer } from './services/storage.js';
+
+import { appendRow, updateRowByPreviewId } from './services/sheets.js';
+import { enqueueRender } from './services/queue.js';
+import { renderCommercial } from './services/render.js';
+import { uploadToYoutube } from './services/youtube.js';
+import { ENV } from './utils/env.js';
 
 const router = Router();
 
 /**
- * Generate preview commercial (AI)
+ * Creates preview assets (script, bg, voice, qr) + logs to Google Sheet
  */
 router.post('/generatePreview', async (req, res) => {
   try {
     const { businessName, businessType, offer, extraInfo, qrType, qrValue } = req.body;
+
     const previewId = uuidv4();
 
-    // 1. Generate AI content
+    // 1) Generate Content with AI
     const content = await generateCommercialContent({
       businessName,
       businessType,
       offer,
-      extraInfo
+      extraInfo,
     });
 
     const bgBase64 = await generateBackgroundImage(content.headline, businessType);
     const voiceBase64 = await generateVoiceover(content.script);
 
-    // 2. Generate QR
-    const qrBuffer = await QRCode.toBuffer(qrValue || ENV.DEFAULT_QR_URL);
+    // 2) Generate QR
+    const qrBuffer = await QRCode.toBuffer(String(qrValue || ''));
 
-    // 3. Upload assets
+    // 3) Upload to GCS
     const bgUrl = await uploadBuffer(
       `previews/${previewId}/bg.png`,
-      Buffer.from(bgBase64, 'base64'),
+      Buffer.from(bgBase64 || '', 'base64'),
       'image/png'
     );
 
@@ -56,34 +59,29 @@ router.post('/generatePreview', async (req, res) => {
 
     const voiceUrl = await uploadBuffer(
       `previews/${previewId}/voice.pcm`,
-      Buffer.from(voiceBase64, 'base64'),
+      Buffer.from(voiceBase64 || '', 'base64'),
       'application/octet-stream'
     );
 
-    // 4. Log to Sheets
-    await appendRow([
+    // 4) Log to Sheets
+    const row = [
       previewId,
       new Date().toISOString(),
       businessName,
       businessType,
       offer,
-      extraInfo || '',
-      qrType || '',
-      qrValue || '',
+      extraInfo,
+      qrType,
+      qrValue,
       content.script,
       content.headline,
       voiceUrl,
       bgUrl,
       qrUrl,
-      '',
-      '',
-      '',
-      'PREVIEWED',
-      '',
-      '',
-      '',
-      ''
-    ]);
+      '', '', '', 'PREVIEWED', '', '', '', ''
+    ];
+
+    await appendRow(row);
 
     res.json({
       previewId,
@@ -91,16 +89,16 @@ router.post('/generatePreview', async (req, res) => {
       visualHeadline: content.headline,
       audioUrl: voiceUrl,
       imageUrl: bgUrl,
-      qrUrl
+      qrUrl: qrUrl,
     });
   } catch (err: any) {
-    console.error('generatePreview error:', err);
-    res.status(500).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: err?.message || 'Unknown error' });
   }
 });
 
 /**
- * Capture lead + request final file
+ * Captures lead details + triggers render queue
  */
 router.post('/requestFile', async (req, res) => {
   try {
@@ -110,69 +108,75 @@ router.post('/requestFile', async (req, res) => {
       lead_name: leadName,
       lead_email: leadEmail,
       lead_phone: leadPhone,
-      status: 'LEAD_CAPTURED'
+      status: 'LEAD_CAPTURED',
     });
 
     await enqueueRender(previewId);
 
     res.json({ ok: true });
   } catch (err: any) {
-    console.error('requestFile error:', err);
-    res.status(500).json({ error: err.message });
+    console.error(err);
+    res.status(500).json({ error: err?.message || 'Unknown error' });
   }
 });
 
 /**
- * Internal render + YouTube upload
+ * Internal endpoint called by queue/worker to render MP4 + upload to YouTube
+ * Protected by INTERNAL_TOKEN
  */
 router.post('/internal/renderAndUpload', async (req, res) => {
   const secret = req.headers['x-internal-secret'];
-  if (secret !== ENV.INTERNAL_TOKEN) {
-    return res.status(403).send('Forbidden');
-  }
+  if (secret !== ENV.INTERNAL_TOKEN) return res.status(403).send('Forbidden');
+
+  const { previewId } = req.body;
 
   try {
-    const { previewId } = req.body;
-
-    const sheets = (req as any).app.locals.sheets;
-    const sheetRes = await sheets.spreadsheets.values.get({
+    // 1) Get Row Data
+    const resSheets = await (req as any).app.locals.sheets.spreadsheets.values.get({
       spreadsheetId: ENV.GOOGLE_SHEET_ID,
-      range: 'Sheet1!A:U'
+      range: 'Sheet1!A:U',
     });
 
-    const rows = sheetRes.data.values || [];
+    const rows: any[] = resSheets?.data?.values || [];
+    if (!rows.length) throw new Error('Sheet is empty or unreadable');
+
     const headers = rows[0];
-    const row = rows.find((r: any) => r[0] === previewId);
+    const row = rows.find((r: any) => r?.[0] === previewId);
+    if (!row) throw new Error(`PreviewId not found in sheet: ${previewId}`);
 
-    if (!row) throw new Error('Preview not found');
+    const bizName = row[headers.indexOf('businessName')] || '';
+    const offer = row[headers.indexOf('offer')] || '';
+    const headline = row[headers.indexOf('visualHeadline')] || '';
 
-    const bizName = row[headers.indexOf('businessName')];
-    const offer = row[headers.indexOf('offer')];
-    const headline = row[headers.indexOf('visualHeadline')];
-
-    // Render MP4
+    // 2) Render MP4
     const videoBuffer = await renderCommercial(previewId, headline, bizName);
+
     const mp4Url = await uploadBuffer(
       `renders/${previewId}/commercial.mp4`,
       videoBuffer,
       'video/mp4'
     );
 
-    // Upload to YouTube
-    const ytMeta = await generateYoutubeMetadata(bizName, offer);
+    // 3) YouTube Meta & Upload
+    const ytMeta = await generateYoutubeMetadata(String(bizName), String(offer));
     const ytResult = await uploadToYoutube(videoBuffer, ytMeta);
 
+    // 4) Final Update
     await updateRowByPreviewId(previewId, {
       status: 'UPLOADED',
       mp4_url: mp4Url,
       youtube_video_id: ytResult.videoId,
-      youtube_url: ytResult.url
+      youtube_url: ytResult.url,
     });
 
     res.json({ ok: true });
   } catch (err: any) {
-    console.error('renderAndUpload error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('Render error:', err);
+    await updateRowByPreviewId(previewId, {
+      status: 'ERROR',
+      error: err?.message || 'Unknown error',
+    });
+    res.status(500).send(err?.message || 'Unknown error');
   }
 });
 
